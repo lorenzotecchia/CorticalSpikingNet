@@ -1,14 +1,14 @@
 from brian2 import *
+import matplotlib
+matplotlib.use('Agg') # Only saves PNGs; also keeps macOS GUI libraries out of the process, which makes fork() safe
 import matplotlib.pyplot as plt
 import numpy as np
 import os
-from network_parameters import net_dict, receptors_dict
 import csv
-from collections import defaultdict
 import pandas as pd
+from network_parameters import input_states
 
 
-np.random.seed(net_dict['Seed']) # Set the seed of the simulation for reproducibility
 class Network_main:
     """"
     Parameters
@@ -58,37 +58,51 @@ class Network_main:
         self.__connect_neuronal_populations(cfg)
         self.__connect_recording_devices()
 
-    def simulate(self, t_sim):
-        """ Simulates the network.
+    def build(self, t_sim):
+        """ Compiles the network into a C++ program that simulates t_sim.
+
+        Compiling happens once; every call of run_with_input() reuses the program.
+        """
+        self.log.info('-----------------------------')
+        self.log.info('Building')
+        self.log.info('-----------------------------')
+        self.net_run = Network(self.spike_mon, self.pops, self.Poisson_groups, self.S_Poisson,
+                                self.S_ampa, self.S_gaba, self.S_nmda) # Every object must be listed here to be simulated
+        self.net_run.run(t_sim) # With build_on_run=False this only records the run; nothing is simulated yet
+        device.build(directory='standalone_build', run=False)
+        self.log.info('Finished building')
+
+    def run_with_input(self, results_dir, state='spont', pert_pop=None, t_state=0*ms, t_pert=0*ms):
+        """ Runs the compiled program once with the given external input.
 
         Parameters
         ----------
-        t_sim: Simulation time in ms.
-
+        results_dir: Folder for this run's raw results, relative to standalone_build (one per parallel run).
+        state: Network state, a key of input_states in network_parameters.py (spont, FF, FB, FF_FB).
+        pert_pop: Name of the population that gets the perturbation (pert_amp), or None.
+        t_state, t_pert: Times at which the state input and the perturbation switch on.
         """
-        @network_operation(dt=1*ms)
-        
-        def update_input(t):
-            # Function in which variables can be changed during simulation time
-            pass
-            # if t>self.net_dict['t_start_DC'] and t<self.net_dict['t_end_DC']: # Add DC input to E4 starting at time t_start_DC and end at t_end_DC
-            #     self.pops[5].I_DC_input = self.net_dict['I_DC'][5] # Value corresponding to E4
-            #     #self.pops[insert_desired_population_index].I_DC_input = self.net_dict['I_DC'][insert_desired_population_index] # Value corresponding to insert_desired_population_index
+        unknown = set(input_states[state]) | ({pert_pop} - {None})
+        unknown -= set(self.net_dict['populations'])
+        assert not unknown, f'Unknown populations: {unknown}'
+        run_args = {}
+        for name, pop in zip(self.net_dict['populations'], self.pops):
+            run_args[pop.t_state] = t_state
+            run_args[pop.t_pert] = t_pert
+            if name in input_states[state]:
+                amp, fraction = input_states[state][name]
+                I_state = np.zeros(len(pop))*pA
+                I_state[:int(len(pop)*fraction)] = amp # First cells of the population, as in the original code
+                run_args[pop.I_state] = I_state
+            if name == pert_pop:
+                run_args[pop.I_pert] = self.net_dict['pert_amp']
+        self.log.info('Running: state %s, perturbation %s', state, pert_pop)
+        device.run(results_directory=results_dir, run_args=run_args, with_output=False)
 
-            # else:
-            #     self.pops[5].I_DC_input = 0.*pA
-            #     #self.pops[insert_desired_population_index].I_DC_input = 0.*pA
-
-        self.log.info('-----------------------------')
-        self.log.info('Simulating')
-        self.log.info('-----------------------------')
-        # Here pay attention to add all synapses and objects (incl network operations) to self.net_mon, otherwise they won't be included in the sim!
-        self.net_run = Network(update_input, self.spike_mon[:], self.rate_mon[:], self.pops, self.Poisson_groups[:], self.S_Poisson[:],
-                                self.S_ampa[:], self.S_gaba[:], self.S_nmda[:]) # This uses Brian2 Network class to inlcude the monitors when running the simulation
-        self.net_run.run(t_sim)
-
-        self.log.info('Finished simulation')
-        self.log.info('-----------------------------')
+    def window_rates(self, t_start, t_end):
+        """ Mean firing rate (Hz) of each population between t_start and t_end, as an array. """
+        return np.array([np.sum((mon.t >= t_start) & (mon.t < t_end)) / (len(pop)*float(t_end - t_start))
+                         for mon, pop in zip(self.spike_mon, self.pops)])
 
 
     def __create_neuronal_populations(self):
@@ -106,16 +120,13 @@ class Network_main:
             g_L_i = self.neuron_dict['g_L'][m]
             population = NeuronGroup(self.net_dict['num_neurons'][m], model=self.eqs_dict['eqs_neuron'], threshold='v > v_th', # repr method to convert a Quantity object, which is a physical quantity with units, to a string that can be used in a string format expression.
                                     reset='v = v_rest', refractory=self.neuron_dict['tau_ref'][m], method='euler')
-            for n in range(self.net_dict['num_neurons'][m]):
-                population[n].v_th = self.neuron_dict['V_th'][m]
-                population[n].v_rest = self.neuron_dict['V_reset'][m]
-                population[n].v[0] = self.neuron_dict['V_0'][m]
-            
+            population.v_th = Vth
+            population.v_rest = Vrest
+            population.v = self.neuron_dict['V_0'][m]
             population.V_L = V_L_i # Set V_l for each population as in network_parameters
             population.C_m = C_m_i # Set C_m for each population as in network_parameters
             population.g_L = g_L_i # Set g_L for each population as in network_parameters
-            population.V_I = receptors_dict['V_I'][m] # V_I for GABA
-            population.I_DC_input = 0*pA # Initial DC input at time t = 0 set to 0pA, can be changed later in simulate function
+            population.V_I = self.receptors_dict['V_I'][m] # V_I for GABA
             self.pops.append(population)
 
     def __create_poisson_bg_input(self):
@@ -144,86 +155,32 @@ class Network_main:
 
         """
         self.log.info('-----------------------------')
-        self.log.info('Connecting synapses (289)')
+        self.log.info('Connecting synapses')
         self.log.info('-----------------------------')
 
         self.S_ampa = []
         self.S_nmda = []
         self.S_gaba = []
-        # Excitatory are: [1, 5, 9, 13]
-        # Inhibitory are: [0, 2, 3, 4, 6, 7, 8, 10, 11, 12, 14, 15, 16]
-        
-        # Dictionary storing every population's equation and what should happen with every pre-synaptic spike
-        # Excitatory populations have both AMPA and NMDA parameters
-        pop_map = {
-            0: ('INH', 'eqs_s_gaba_l1vip', ''),
-            1: ('EXC', 'eqs_s_ampa_l23', 'eqs_s_nmda_l23'),
-            2: ('INH', 'eqs_s_gaba_l23pv', ''),
-            3: ('INH', 'eqs_s_gaba_l23sst', ''),
-            4: ('INH', 'eqs_s_gaba_l23vip', ''),
-            5: ('EXC', 'eqs_s_ampa_l4', 'eqs_s_nmda_l4'),
-            6: ('INH', 'eqs_s_gaba_l4pv', ''),
-            7: ('INH', 'eqs_s_gaba_l4sst', ''),
-            8: ('INH', 'eqs_s_gaba_l4vip', ''),
-            9: ('EXC', 'eqs_s_ampa_l5', 'eqs_s_nmda_l5'),
-            10: ('INH', 'eqs_s_gaba_l5pv', ''),
-            11: ('INH', 'eqs_s_gaba_l5sst', ''),
-            12: ('INH', 'eqs_s_gaba_l5vip', ''),
-            13: ('EXC', 'eqs_s_ampa_l6', 'eqs_s_nmda_l6'),
-            14: ('INH', 'eqs_s_gaba_l6pv', ''),
-            15: ('INH', 'eqs_s_gaba_l6sst', ''),
-            16: ('INH', 'eqs_s_gaba_l6vip', ''),
-        }
-        iteration = 1
-        # For each target, create synapses from all possible sources
+        # Excitatory sources (index -> NMDA equation of their layer); all other populations are inhibitory (GABA)
+        nmda_eqs = {1: 'eqs_s_nmda_l23', 5: 'eqs_s_nmda_l4', 9: 'eqs_s_nmda_l5', 13: 'eqs_s_nmda_l6'}
         for n, target_pop in enumerate(self.pops):
-            for m, source_pop in enumerate(self.pops, start=0):
-                self.net_dict['connect_probs'][n][m] = float(self.net_dict['connect_probs'][n][m]) * cfg.synaptic_density
-                print('Synapse', iteration)
-                iteration += 1
-                neuron_type, eq_1, eq_2 = pop_map[m]
-                # GABA synapses
-                if neuron_type == 'INH':
-                    S = Synapses(source_pop, target_pop, model=self.eqs_dict[eq_1], on_pre='s_gaba += 1', method='euler')
-                    if m == n:
-                        S.connect(condition='i != j', p=self.net_dict['connect_probs'][n][m]) # Prevent auto-synapses
-                    else:
-                        S.connect(p=self.net_dict['connect_probs'][n][m])
-                    if self.net_dict['connect_probs'][n][m] == 0 or self.net_dict['synaptic_strength'][n][m] == 0: # Condition to prevent division by 0 when calculating weight
-                        S.w = 0
-                    else:
-                        S.w = self.net_dict['global_g']*self.net_dict['synaptic_strength'][n][m]/(self.net_dict['num_neurons'][m]*self.net_dict['connect_probs'][n][m]) # Formula for synaptic weight used in Giulia's model
+            for m, source_pop in enumerate(self.pops):
+                p = self.net_dict['connect_probs'][n][m] * cfg.synaptic_density # Local copy: net_dict stays unchanged between runs
+                strength = self.net_dict['synaptic_strength'][n][m]
+                if p == 0 or strength == 0:
+                    continue # No connection: skip it instead of building an empty Synapses object
+                if m in nmda_eqs: # Excitatory: AMPA and NMDA synapses, drawn with 0.8*p and 0.2*p
+                    receptors = [('w : 1', 's_ampa_post += w', self.net_dict['proportion_AMPA'], self.S_ampa),
+                                 (self.eqs_dict[nmda_eqs[m]], 'x += 1', self.net_dict['proportion_NMDA'], self.S_nmda)]
+                else: # Inhibitory: GABA synapses
+                    receptors = [('w : 1', 's_gaba_post += w', 1., self.S_gaba)]
+                for model, on_pre, fraction, synapse_list in receptors:
+                    S = Synapses(source_pop, target_pop, model=model, on_pre=on_pre, method='euler')
+                    S.connect(condition='i != j' if m == n else None, p=fraction*p) # i != j prevents auto-synapses
+                    S.w = self.net_dict['global_g']*strength/(self.net_dict['num_neurons'][m]*fraction*p) # Eq. 11 of Moreni et al. (2025)
                     S.delay = self.net_dict['delay']
-                    self.S_gaba.append(S)
-                    del S
-                elif neuron_type == 'EXC':
-                    # AMPA synapses
-                    S = Synapses(source_pop, target_pop, model=self.eqs_dict[eq_1], on_pre='s_ampa += 1', method='euler')
-                    if m == n:
-                        S.connect(condition='i != j', p=self.net_dict['proportion_AMPA']*self.net_dict['connect_probs'][n][m]) # Prevent auto-synapses
-                    else:
-                        S.connect(p=self.net_dict['proportion_AMPA']*self.net_dict['connect_probs'][n][m])
-                    if self.net_dict['connect_probs'][n][m] == 0 or self.net_dict['synaptic_strength'][n][m] == 0: # Condition to prevent division by 0 when calculating weight
-                        S.w = 0
-                    else:
-                        S.w = self.net_dict['global_g']*self.net_dict['synaptic_strength'][n][m]/(self.net_dict['num_neurons'][m]*self.net_dict['proportion_AMPA']*self.net_dict['connect_probs'][n][m]) # Formula for synaptic weight used in Giulia's model
-                    S.delay = self.net_dict['delay']
-                    self.S_ampa.append(S)
-                    del S
-
-                    # NMDA synapses
-                    S = Synapses(source_pop, target_pop, model=self.eqs_dict[eq_2], on_pre='x += 1', method='euler')
-                    if m == n:
-                        S.connect(condition='i != j', p=self.net_dict['proportion_NMDA']*self.net_dict['connect_probs'][n][m]) # Prevent auto-synapses
-                    else:
-                        S.connect(p=self.net_dict['proportion_NMDA']*self.net_dict['connect_probs'][n][m])
-                    if self.net_dict['connect_probs'][n][m] == 0 or self.net_dict['synaptic_strength'][n][m] == 0: # Condition to prevent division by 0 when calculating weight
-                        S.w = 0
-                    else:
-                        S.w = self.net_dict['global_g']*self.net_dict['synaptic_strength'][n][m]/(self.net_dict['num_neurons'][m]*self.net_dict['proportion_NMDA']*self.net_dict['connect_probs'][n][m]) # Formula for synaptic weight used in Giulia's model
-                    S.delay = self.net_dict['delay']
-                    self.S_nmda.append(S)
-                    del S
+                    synapse_list.append(S)
+        self.log.info('Synapse objects: %s AMPA, %s NMDA, %s GABA', len(self.S_ampa), len(self.S_nmda), len(self.S_gaba))
 
 
     def __connect_poisson_bg_input(self):
@@ -251,11 +208,7 @@ class Network_main:
         self.log.info('-----------------------------')
         self.log.info('Connecting recording devices')
 
-        self.spike_mon = list(range(self.num_pops)) # List of spike monitors
-        self.rate_mon = list(range(self.num_pops)) # List of rate monitors
-        for i in np.arange(self.num_pops):
-            self.spike_mon[i] = SpikeMonitor(self.pops[i]) # Record from all neurons in each population
-            self.rate_mon[i] = PopulationRateMonitor(self.pops[i])
+        self.spike_mon = [SpikeMonitor(pop) for pop in self.pops] # Record from all neurons in each population
     
     def plot_spikes(self, raster_plots_dir):
         """ Plots raster graphs after simulation is run.
@@ -275,6 +228,7 @@ class Network_main:
             ylabel('Neuron index')
             legend()
             plt.savefig(os.path.join(raster_plots_dir, f"5000_spikes_population_{i}.png"))
+            plt.close()
 
     def firing_rates(self, t_sim, metrics_dir):
         """ Calculates and prints mean firing rates in spikes/s for each population.
@@ -288,21 +242,17 @@ class Network_main:
 
             new_row = [self.net_dict['populations'][i], f'{mean_rate:.2f}']
             avg_firing_rates.loc[len(avg_firing_rates)] = new_row
-            avg_firing_rates.to_csv(avg_firing_rates_path, index=False)       
+        avg_firing_rates.to_csv(avg_firing_rates_path, index=False)
 
     def write_data(self, spike_times_dir):
         """ Creates files with spike data.
             For each population, create a csv file which has one column
             with the index of the neuron and the second column with
-            a list containing the spike times (in s or ms) of that neuron.
+            a list containing the spike times (in ms) of that neuron.
             Saves them in a folder called Spike_times of the current run.
         """
         for n in range(self.num_pops):
-            data = defaultdict(list)
-            for i in range(len(self.spike_mon[n].i)):
-                spike_time = self.spike_mon[n].t[i]
-                data[self.spike_mon[n].i[i]].append(spike_time)
             with open(f"{spike_times_dir}/{self.net_dict['populations'][n]}.csv", 'w') as csv_file:
                 writer = csv.writer(csv_file)
-                for key, value in data.items():
-                    writer.writerow([key, value])
+                for neuron, times in self.spike_mon[n].spike_trains().items():
+                    writer.writerow([neuron, np.round(times/ms, 1).tolist()]) # Spike times in ms, as plain floats

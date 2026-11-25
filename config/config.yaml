@@ -3,3 +3,15 @@ t_sim: 500 # Simulation time in ms
 synaptic_density: 1
 
 experiment_type: None
+
+input: # External input of a single run (simulate.py); changing it needs no recompiling
+  state: spont # spont, FF, FB or FF_FB (input_states in network_parameters.py)
+  t_state: 700 # ms, when the state input switches on
+  pert: null # Population that gets the perturbation (pert_amp), e.g. L23E; null = none
+  t_pert: 0 # ms, when the perturbation switches on
+
+sweep: # Perturbation matrices (perturbation_matrix.py); it sets t_sim = warmup + 2*window itself
+  states: [spont, FF, FB, FF_FB]
+  warmup: 500 # ms skipped at the start, while the network settles
+  window: 3000 # ms; rates in this window before the perturbation are compared to the same window after it
+  workers: 8 # Simulations run at the same time, one core each

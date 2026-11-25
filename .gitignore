@@ -7,3 +7,9 @@ runs
 Data
 *.txt
 
+standalone_build
+
+# Claude Code context (local only)
+CLAUDE.md
+.claude/
+.DS_Store

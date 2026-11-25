@@ -2,7 +2,6 @@ import datetime
 from omegaconf import OmegaConf
 import os
 import logging
-import pandas as pd
 
 def save_config(cfg, run_dir): # Save config file explicitly
     with open(os.path.join(run_dir, "config.yaml"), 'w') as f:
@@ -27,6 +26,7 @@ def create_run_folder(base_dir: str, experiment_type: str):
 def setup_loggers(run_dir):
     log = logging.getLogger(__name__)
     log.setLevel(logging.DEBUG) # DEBUG level captures all messages
+    log.handlers.clear() # A second run in the same process must not keep writing to the first run's files
 
     # Create handlers for each level we want: info, warning, error
     info_handler = logging.FileHandler(os.path.join(run_dir, 'info.log'))
@@ -49,18 +49,3 @@ def setup_loggers(run_dir):
     log.addHandler(warning_handler)
     log.addHandler(error_handler)
     return log
-
-def create_weights_dict(file_path):
-    df = pd.read_csv(file_path)
-    weights_dict = {}
-    
-    for index, row in df.iterrows():
-        source = row['Source Population']
-        target = row['Target Population']
-        weight = row['Weight Value']
-        
-        if source not in weights_dict:
-            weights_dict[source] = {}
-        weights_dict[source][target] = weight
-    
-    return weights_dict

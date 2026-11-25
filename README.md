@@ -27,18 +27,43 @@ Run main simulation:
 ```
 python3 simulate.py t_sim=1000 experiment_type=experiment_name
 ```
+The simulation runs as compiled C++ (Brian2 `cpp_standalone` mode). The first run compiles about 1200 C++ files (a few minutes, kept in `standalone_build/`); later runs only recompile what changed. A 500 ms simulation then takes about 1-2 s. Brian2's OpenMP option is deliberately not used: on this model it made runs about 85x slower.
+
+### Make targets
+The usual runs have `make` shortcuts (run `make` to list them). Use them with the conda environment active:
+```
+make spont                      # spontaneous activity, 3.5 s (Fig 2)
+make ff T=2000                  # feedforward input from 700 ms (Fig 1C)
+make matrices STATES=spont,FF   # perturbation matrices (Fig 3)
+```
+Variables: `T` (ms), `NAME` (run folder suffix), `STATE`, `PERT`, `T_PERT`, `STATES`, `WORKERS`, `PY`, `EXPERIMENT_PATH`.
+
+### External input (Iext)
+Each run can give the network a state input and a perturbation, as in Moreni et al. (2025). Positive currents excite. They are set in `config/config.yaml` under `input`, and changing them does not recompile anything:
+```
+python3 simulate.py t_sim=2000 input.state=FF input.t_state=700           # Fig 1C: 150 pA to 25% of E4 and 5% of PV4 from 700 ms
+python3 simulate.py t_sim=2000 input.pert=L23E input.t_pert=1000          # 30 pA to all L2/3 E cells from 1000 ms
+```
+States (`spont`, `FF`, `FB`, `FF_FB`) are defined in `input_states` in `network_parameters.py`.
+
+### Perturbation matrices
+```
+python3 perturbation_matrix.py experiment_type=matrices
+```
+For every state in `sweep.states` it perturbs each population in turn and saves, per state, the % change of every population's rate (window after the perturbation vs the same window before). The network is compiled once and the runs reuse it, `sweep.workers` at a time.
 
 ## Structure of the repository:
 ```text
 ├── config
 │   ├── config.yaml
-├── plotting
 ├── utils
 │   ├── utils.py
 ├── environment.yml
+├── Makefile
 ├── network_main.py
 ├── network_parameters.py
 ├── README.md
+├── perturbation_matrix.py
 ├── run_simulations.sh
 └── simulate.py
 ```
@@ -46,10 +71,6 @@ python3 simulate.py t_sim=1000 experiment_type=experiment_name
 ### config/config.yaml
 
 Defines the configuration parameters to identify a particular run, such as simulation time, expertiment type etc. The project uses [Hydra](https://hydra.cc/) to manage configurations.
-
-### plotting/
-
-Scripts or notebooks to analyze data after a simulation finished.
 
 ### utils/utils.py
 
@@ -73,7 +94,7 @@ Defines the time resolution of the simulation, creates run folder, sets up logge
 
 ### Results
 
-Results will be saved in the run folder as indicated by the EXPERIMENT_PATH variable (usually called *runs*). It will contain the config file used at run time, the logger outputs and three folders: metrics, raster_plots and spike_times, which can be used to analyze results.
+Results will be saved in the run folder as indicated by the EXPERIMENT_PATH variable (usually called *runs*). It will contain the config file used at run time, the logger outputs and three folders: metrics, raster_plots and spike_times (one CSV per population: neuron index, list of spike times in ms), which can be used to analyze results.
 
 **Note**, the code might take longer to run the first time, however, Brian2 will usually keep information in cache for subsequent runs and shorten the simulation time significantly.
 

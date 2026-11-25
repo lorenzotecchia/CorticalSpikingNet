@@ -32,10 +32,6 @@ L_6_vip = int(0.083333*proportion_inh*N_6) # Number of VIP neurons in layer 6
 net_dict = {
     # Simulation seed
     'Seed': 55,
-    # Total number of neurons
-    'N' : N_tot,
-    # Scaling factor for number of neurons
-    'N_scaling': 1.,
     # Names of the populations simulated
     'populations': ['L1VIP', 'L23E', 'L23PV', 'L23SST', 'L23VIP', 'L4E', 'L4PV', 'L4SST', 'L4VIP', 'L5E', 'L5PV', 'L5SST', 'L5VIP', 'L6E', 'L6PV', 'L6SST', 'L6VIP'],
     # Number of neurons in the populations simulated (same order as above)
@@ -89,30 +85,26 @@ net_dict = {
     'proportion_NMDA': 0.2,
     # There is only one synaptic delay in Giulia's column model, 2*ms
     'delay' : 2.*ms,
-    # Transmission delay for excitatory connections
-    'delay_e': np.array([2.,2., 2., 2., 2., 2., 2., 2., 2., 2., 2., 2., 2., 2., 2., 2., 2.])*ms,
-    # Transmission delay for inhibitory connections
-    'delay_i': np.array([2., 2., 2., 2., 2., 2., 2., 2., 2., 2., 2., 2., 2., 2., 2., 2., 2.])*ms,
     # Rate of Poisson generator for background noise, same order as in 'populations'
     'bg_rate':
         np.array([650., 930., 1460., 870., 1405., 890., 1980., 2105., 240., 4740., 930., 530., 870., 1770., 1170., 885., 1620.])*Hz,
-    # Delay Poisson background
-    'delay_poisson': 1*ms,
-    # DC input given at chosen time and to chosen populations in network_main
-    'I_DC':
-        np.array([0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0.])*pA,
-    # DC input start time
-    't_start_DC': 700*ms,
-    # DC input end time
-    't_end_DC': 1500*ms,
-    # Rate of Poisson external input generators
-    'Poisson_external':
-        np.array([0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0.])*Hz,
-    # Poisson external input start time
-    't_start_Poisson': 700*ms,
-    # Poisson external input end time
-    't_end_Poisson': 1500*ms,
-    
+    # Amplitude of the perturbation given to one population at a time (perturbation matrices)
+    'pert_amp': 30*pA,
+}
+
+# Network states of Moreni et al. (2025): population -> (input amplitude, fraction of its cells that receive it).
+# The input goes to the first cells of the population, as in the original code.
+input_states = {
+    'spont': {},
+    'FF': {'L4E': (150*pA, 0.25), 'L4PV': (150*pA, 0.05)},
+    'FB': {'L5E': (150*pA, 0.25), 'L5PV': (150*pA, 0.05)},
+    'FF_FB': {'L4E': (150*pA, 0.25), 'L4PV': (150*pA, 0.05), 'L5E': (150*pA, 0.25), 'L5PV': (150*pA, 0.05)},
+    # The four feedback states of Fig 5
+    'FB23': {'L23E': (150*pA, 0.25), 'L23PV': (150*pA, 0.05)},
+    'FB23_5': {'L23E': (150*pA, 0.25), 'L23PV': (150*pA, 0.05), 'L5E': (150*pA, 0.25), 'L5PV': (150*pA, 0.05)},
+    'FB6': {'L6E': (150*pA, 0.25), 'L6PV': (150*pA, 0.05)},
+    'FB23_5_6': {'L23E': (150*pA, 0.25), 'L23PV': (150*pA, 0.05), 'L5E': (150*pA, 0.25), 'L5PV': (150*pA, 0.05),
+                 'L6E': (150*pA, 0.25), 'L6PV': (150*pA, 0.05)},
 }
 
 neuron_dict = {
@@ -172,207 +164,41 @@ eqs_dict = {
     # Equation for neuron
     'eqs_neuron': Equations(f'''
 
-        dv/dt = (-g_L*(v - V_L) - I_syn)/C_m: volt (unless refractory)
-        I_syn = I_DC_input + I_ampa_ext + I_ampa_rec + I_nmda + I_gaba : amp
+        dv/dt = (-g_L*(v - V_L) - I_syn + I_ext)/C_m: volt (unless refractory)
+        I_syn = I_ampa_ext + I_ampa_rec + I_nmda + I_gaba : amp
+
+        # External input (Iext in the paper), POSITIVE = excitatory. Two inputs that switch on at their own time:
+        # a network state (FF/FB, see input_states) and a perturbation. All set per run via run_args, no recompiling.
+        I_ext = I_state*int(t >= t_state) + I_pert*int(t >= t_pert) : amp
+        I_state : amp
+        I_pert : amp
+        t_state : second (shared)
+        t_pert : second (shared)
 
         V_L : volt
         g_L : siemens
         C_m : farad
         v_th : volt
         v_rest : volt
-        I_DC_input: amp
 
         I_ampa_ext = {receptors_dict['g_ampa_ext']}*nS*(v - {receptors_dict['V_E']}*mV)*s_ampa_ext : amp
         ds_ampa_ext/dt = -s_ampa_ext/({receptors_dict['tau_ampa']}*ms) : 1
 
-        I_ampa_rec = {receptors_dict['g_ampa_rec']}*nS*(v - {receptors_dict['V_E']}*mV)*s_ampa_tot : amp
-        s_ampa_tot = s_ampa_tot_l23 + s_ampa_tot_l4 + s_ampa_tot_l5 + s_ampa_tot_l6 : 1
-        s_ampa_tot_l23 : 1
-        s_ampa_tot_l4 : 1 
-        s_ampa_tot_l5 : 1
-        s_ampa_tot_l6 : 1
+        # Recurrent AMPA and GABA live on the neuron: one decaying variable per receptor that jumps by w at each
+        # incoming spike. Exactly equal to the sum of per-synapse variables (Eqs. 4, 5, 7, 10), since all share one tau.
+        I_ampa_rec = {receptors_dict['g_ampa_rec']}*nS*(v - {receptors_dict['V_E']}*mV)*s_ampa : amp
+        ds_ampa/dt = -s_ampa/({receptors_dict['tau_ampa']}*ms) : 1
 
-        I_gaba = {receptors_dict['g_gaba']}*nS*(v - V_I)*s_gaba_tot : amp
+        I_gaba = {receptors_dict['g_gaba']}*nS*(v - V_I)*s_gaba : amp
         V_I : volt
-        s_gaba_tot = s_gaba_tot_l1vip + s_gaba_tot_l23pv + s_gaba_tot_l23sst + s_gaba_tot_l23vip + s_gaba_tot_l4pv + s_gaba_tot_l4sst + s_gaba_tot_l4vip
-                     + s_gaba_tot_l5pv + s_gaba_tot_l5sst + s_gaba_tot_l5vip + s_gaba_tot_l6pv + s_gaba_tot_l6sst + s_gaba_tot_l6vip : 1
-        s_gaba_tot_l1vip : 1
-        s_gaba_tot_l23pv : 1
-        s_gaba_tot_l23sst : 1
-        s_gaba_tot_l23vip : 1
-        s_gaba_tot_l4pv : 1
-        s_gaba_tot_l4sst : 1
-        s_gaba_tot_l4vip : 1
-        s_gaba_tot_l5pv : 1
-        s_gaba_tot_l5sst : 1
-        s_gaba_tot_l5vip : 1
-        s_gaba_tot_l6pv : 1
-        s_gaba_tot_l6sst : 1
-        s_gaba_tot_l6vip : 1
-        
+        ds_gaba/dt = -s_gaba/({receptors_dict['tau_gaba']}*ms) : 1
+
         I_nmda = ({receptors_dict['g_nmda']}*nS*(v - {receptors_dict['V_E']}*mV)/(1 + {receptors_dict['Mg2']}*exp(-0.062*v/mV)/3.57))*s_nmda_tot : amp
         s_nmda_tot = s_nmda_tot_l23 + s_nmda_tot_l4 + s_nmda_tot_l5 + s_nmda_tot_l6 : 1
         s_nmda_tot_l23 : 1
         s_nmda_tot_l4 : 1
         s_nmda_tot_l5 : 1
         s_nmda_tot_l6 : 1
-
-        '''),
-
-### AMPA ###
-
-    # Equation for AMPA originating in layer 2/3
-    'eqs_s_ampa_l23': Equations(f'''
-
-        s_ampa_tot_l23_post = w*s_ampa : 1 (summed)  
-        ds_ampa/dt = - s_ampa/({receptors_dict['tau_ampa']}*ms) : 1 (clock-driven)
-        w : 1
-
-        '''),
-
-    # Equation for AMPA originating in layer 4
-    'eqs_s_ampa_l4': Equations(f'''
-
-        s_ampa_tot_l4_post = w*s_ampa : 1 (summed)  
-        ds_ampa/dt = - s_ampa/({receptors_dict['tau_ampa']}*ms) : 1 (clock-driven)
-        w : 1
-
-        '''),
-
-    # Equation for AMPA originating in layer 5
-    'eqs_s_ampa_l5': Equations(f'''
-
-        s_ampa_tot_l5_post = w*s_ampa : 1 (summed)  
-        ds_ampa/dt = - s_ampa/({receptors_dict['tau_ampa']}*ms) : 1 (clock-driven)
-        w : 1
-
-        '''),
-
-    # Equation for AMPA originating in layer 6
-    'eqs_s_ampa_l6': Equations(f'''
-
-        s_ampa_tot_l6_post = w*s_ampa : 1 (summed)  
-        ds_ampa/dt = - s_ampa/({receptors_dict['tau_ampa']}*ms) : 1 (clock-driven)
-        w : 1
-
-        '''),
-
-### GABA ###
-
-    # Equation for GABA L1VIP
-    'eqs_s_gaba_l1vip': Equations(f'''
-
-        s_gaba_tot_l1vip_post = w*s_gaba : 1 (summed)  
-        ds_gaba/dt = - s_gaba/({receptors_dict['tau_gaba']}*ms) : 1 (clock-driven)
-        w : 1
-
-        '''),
-
-    # Equation for GABA L23PV
-    'eqs_s_gaba_l23pv': Equations(f'''
-
-        s_gaba_tot_l23pv_post = w*s_gaba : 1 (summed)  
-        ds_gaba/dt = - s_gaba/({receptors_dict['tau_gaba']}*ms) : 1 (clock-driven)
-        w : 1
-
-        '''),
-
-    # Equation for GABA L23SST
-    'eqs_s_gaba_l23sst': Equations(f'''
-
-        s_gaba_tot_l23sst_post = w*s_gaba : 1 (summed)  
-        ds_gaba/dt = - s_gaba/({receptors_dict['tau_gaba']}*ms) : 1 (clock-driven)
-        w : 1
-
-        '''),
-
-    # Equation for GABA L23VIP
-    'eqs_s_gaba_l23vip': Equations(f'''
-
-        s_gaba_tot_l23vip_post = w*s_gaba : 1 (summed)  
-        ds_gaba/dt = - s_gaba/({receptors_dict['tau_gaba']}*ms) : 1 (clock-driven)
-        w : 1
-
-        '''),
-
-    # Equation for GABA L4PV
-    'eqs_s_gaba_l4pv': Equations(f'''
-
-        s_gaba_tot_l4pv_post = w*s_gaba : 1 (summed)  
-        ds_gaba/dt = - s_gaba/({receptors_dict['tau_gaba']}*ms) : 1 (clock-driven)
-        w : 1
-
-        '''),
-
-    # Equation for GABA L4SST
-    'eqs_s_gaba_l4sst': Equations(f'''
-
-        s_gaba_tot_l4sst_post = w*s_gaba : 1 (summed)  
-        ds_gaba/dt = - s_gaba/({receptors_dict['tau_gaba']}*ms) : 1 (clock-driven)
-        w : 1
-
-        '''),
-
-    # Equation for GABA L4VIP
-    'eqs_s_gaba_l4vip': Equations(f'''
-
-        s_gaba_tot_l4vip_post = w*s_gaba : 1 (summed)  
-        ds_gaba/dt = - s_gaba/({receptors_dict['tau_gaba']}*ms) : 1 (clock-driven)
-        w : 1
-
-        '''),
-
-    # Equation for GABA L5PV
-    'eqs_s_gaba_l5pv': Equations(f'''
-
-        s_gaba_tot_l5pv_post = w*s_gaba : 1 (summed)  
-        ds_gaba/dt = - s_gaba/({receptors_dict['tau_gaba']}*ms) : 1 (clock-driven)
-        w : 1
-
-        '''),
-
-    # Equation for GABA L5SST
-    'eqs_s_gaba_l5sst': Equations(f'''
-
-        s_gaba_tot_l5sst_post = w*s_gaba : 1 (summed)  
-        ds_gaba/dt = - s_gaba/({receptors_dict['tau_gaba']}*ms) : 1 (clock-driven)
-        w : 1
-
-        '''),
-
-    # Equation for GABA L5VIP
-    'eqs_s_gaba_l5vip': Equations(f'''
-
-        s_gaba_tot_l5vip_post = w*s_gaba : 1 (summed)  
-        ds_gaba/dt = - s_gaba/({receptors_dict['tau_gaba']}*ms) : 1 (clock-driven)
-        w : 1
-
-        '''),
-
-    # Equation for GABA L6PV
-    'eqs_s_gaba_l6pv': Equations(f'''
-
-        s_gaba_tot_l6pv_post = w*s_gaba : 1 (summed)  
-        ds_gaba/dt = - s_gaba/({receptors_dict['tau_gaba']}*ms) : 1 (clock-driven)
-        w : 1
-
-        '''),
-
-    # Equation for GABA L6SST
-    'eqs_s_gaba_l6sst': Equations(f'''
-
-        s_gaba_tot_l6sst_post = w*s_gaba : 1 (summed)  
-        ds_gaba/dt = - s_gaba/({receptors_dict['tau_gaba']}*ms) : 1 (clock-driven)
-        w : 1
-
-        '''),
-
-    # Equation for GABA L6VIP
-    'eqs_s_gaba_l6vip': Equations(f'''
-
-        s_gaba_tot_l6vip_post = w*s_gaba : 1 (summed)  
-        ds_gaba/dt = - s_gaba/({receptors_dict['tau_gaba']}*ms) : 1 (clock-driven)
-        w : 1
 
         '''),
 
